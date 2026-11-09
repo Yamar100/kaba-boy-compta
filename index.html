@@ -1792,6 +1792,7 @@ var Core = (function () {
   function renderBanner() {
     var b = $('#banner'), html = '';
     if (S.mode === 'gh') html = ghBanner();
+    else if (S.mode === 'db') html = '<div class="banner info"><span>L’appli principale est maintenant installable, avec tes données sur GitHub. Cette version-ci n’est plus mise à jour.</span><a href="https://yamar100.github.io/kaba-boy-compta/" target="_blank" rel="noopener" style="font-weight:700;color:inherit">Ouvrir la nouvelle appli</a></div>';
     else if (S.mode === 'local') html = '<div class="banner info">Mode hors ligne : tes données restent dans ce navigateur. Ouvre l’appli depuis Claude pour les retrouver partout.</div>';
     else if (S.readonly) html = '<div class="banner">Lecture seule : seul le propriétaire de l’appli peut modifier les données.</div>';
     else if (S.slow) html = '<div class="banner">Tes données mettent du temps à arriver. Vérifie ta connexion ; l’affichage se mettra à jour tout seul.</div>';
