@@ -421,6 +421,9 @@ var Core = (function () {
     { key: 'crowdfunding', fr: 'Collectes (montant total reçu)', de: 'Einnahmen aus Spendenaktionen (Crowdfunding)' },
     { key: 'other', fr: 'Autre recette', de: 'Sonstige Einnahmen' }
   ];
+  /* Collectes in "transit" mode: only Kevin's agreed share is revenue, the family's part is a durchlaufender Posten */
+  var SHARE_CAT = { key: 'collectShare', fr: 'Ta part des collectes', de: 'Anteile aus Spendenaktionen (vereinbarte Produktionspauschale)' };
+  function collectMode(settings) { return (settings && settings.collectMode) === 'full' ? 'full' : 'transit'; }
 
   var METHODS = ['Virement', 'Carte', 'PayPal', 'Espèces', 'Mobile Money', 'LemFi', 'Autre'];
 
@@ -612,13 +615,28 @@ var Core = (function () {
     return { days: days, counted: counted, ded: r2(counted * HO_DAY) };
   }
 
+  // Kevin's share of a collecte: what came in minus what was paid out to the beneficiary
+  // (the linked payout expense is the truth when it exists, else the amount stored on the collecte)
+  function collectSplit(i, expById) {
+    var c = i.collect || {}, amt = r2(i.amount);
+    var px = c.expenseId && expById ? expById[c.expenseId] : null;
+    var paid = r2(px ? num(px.amount) : num(c.payout));
+    return { collected: amt, paid: paid, share: r2(Math.max(0, amt - paid)), proof: px ? !!(px.receiptId || px.receiptKept) : (paid > 0 ? false : null) };
+  }
   function euer(state, year) {
     var y = String(year);
     function inY(iso) { return !!iso && String(iso).slice(0, 4) === y; }
     var settings = state.settings || {};
     var entries = [];
-    var byType = { invoice: 0, platform: 0, sponsor: 0, donation: 0, crowdfunding: 0, other: 0 };
+    var byType = { invoice: 0, platform: 0, sponsor: 0, donation: 0, crowdfunding: 0, other: 0, collectShare: 0 };
     var vatCollected = 0;
+    var transitMode = collectMode(settings) === 'transit';
+    var expById = {}, transitExp = {}, collectIncs = {};
+    (state.expenses || []).forEach(function (e) { expById[e.id] = e; });
+    (state.incomes || []).forEach(function (i) { if (i.collect) { collectIncs[i.id] = i; if (i.collect.expenseId) transitExp[i.collect.expenseId] = true; } });
+    (state.expenses || []).forEach(function (e) { if (e.collectIncomeId && collectIncs[e.collectIncomeId]) transitExp[e.id] = true; });
+    if (!transitMode) transitExp = {};
+    var transit = { mode: transitMode ? 'transit' : 'full', collected: 0, payout: 0, share: 0, rows: [], missingProof: 0 };
     (state.docs || []).forEach(function (d) {
       if (d.kind !== 'invoice' || d.status !== 'paid' || !inY(d.paidAt)) return;
       var amt = eurOfInvoice(d);
@@ -633,6 +651,17 @@ var Core = (function () {
       if (!inY(i.date)) return;
       var c = incCatByKey(i.category);
       var amt = r2(i.amount);
+      if (transitMode && i.collect) {
+        var sp = collectSplit(i, expById);
+        byType.collectShare += sp.share;
+        transit.collected = r2(transit.collected + amt); transit.payout = r2(transit.payout + sp.paid); transit.share = r2(transit.share + sp.share);
+        if (sp.proof === false) transit.missingProof++;
+        transit.rows.push({ date: i.date, name: i.collect.name || i.desc || '', beneficiary: i.collect.beneficiary || '', collected: amt, payout: sp.paid, share: sp.share, proof: sp.proof, id: i.id, example: !!i.example });
+        entries.push({ date: i.date, dir: 'in', cat: SHARE_CAT.key, catDe: SHARE_CAT.de, catFr: SHARE_CAT.fr,
+          label: (i.desc || i.collect.name || 'Spendenaktion') + ' – Anteil (gesammelt ' + money(amt, 'EUR', 'de') + ', weitergeleitet ' + money(sp.paid, 'EUR', 'de') + ')', party: i.source || '',
+          amount: sp.share, ded: sp.share, receipt: !!(i.receiptId || i.receiptKept), ref: '', coll: 'incomes', id: i.id, example: !!i.example });
+        return;
+      }
       byType[c.key] = (byType[c.key] || 0) + amt;
       entries.push({ date: i.date, dir: 'in', cat: c.key, catDe: c.de, catFr: c.fr, label: i.desc || i.source || c.fr, party: i.source || '',
         amount: amt, ded: amt, receipt: !!(i.receiptId || i.receiptKept), ref: '', coll: 'incomes', id: i.id, example: !!i.example });
@@ -640,6 +669,7 @@ var Core = (function () {
     var byCat = {}, assets = [], afaRows = [], missing = [], rcItems = [], privateCount = 0;
     var afaTotal = 0, rcTotal = 0;
     (state.expenses || []).forEach(function (e) {
+      if (transitExp[e.id]) return; // paid out to a beneficiary: money in transit, not an expense
       var c = catByKey(e.category);
       var pct = expPct(e);
       if (c.key === 'asset') {
@@ -702,8 +732,9 @@ var Core = (function () {
       var mi = Number(String(e.date).slice(5, 7)) - 1;
       if (mi >= 0 && mi < 12) months[mi][e.dir] = r2(months[mi][e.dir] + e.amount);
     });
+    transit.rows.sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
     return {
-      year: Number(year), entries: entries, byType: byType, incomeTotal: incomeTotal, vatCollected: r2(vatCollected),
+      year: Number(year), entries: entries, byType: byType, incomeTotal: incomeTotal, vatCollected: r2(vatCollected), transit: transit,
       expenseCats: expenseCats, catDed: catDed, afaTotal: afaTotal, afaRows: afaRows, homeoffice: ho,
       rcTotal: rcTotal, rcMonths: Object.keys(rcMonths).sort().map(function (k) { return rcMonths[k]; }),
       expenseTotal: expenseTotal, expenseGross: expenseGross, privateCount: privateCount,
@@ -931,6 +962,7 @@ var Core = (function () {
     section('Betriebseinnahmen');
     row('Umsätze aus bezahlten Rechnungen', M(rep.byType.invoice), { rule: true });
     INCOME_CATS.forEach(function (c) { if (rep.byType[c.key]) row(c.de, M(rep.byType[c.key]), { rule: true }); });
+    if (rep.byType.collectShare) row(SHARE_CAT.de, M(rep.byType.collectShare), { rule: true });
     if (rep.vatCollected) row('davon vereinnahmte Umsatzsteuer', M(rep.vatCollected), { muted: true, rule: true });
     row(s.ku ? 'Summe Betriebseinnahmen (Kleinunternehmer, § 19 UStG)' : 'Summe Betriebseinnahmen', M(rep.incomeTotal), { bold: true });
     y += 3;
@@ -952,6 +984,18 @@ var Core = (function () {
     row('abzüglich Betriebsausgaben', '- ' + M(rep.expenseTotal), { rule: true });
     row(rep.profit >= 0 ? 'Überschuss (Gewinn)' : 'Verlust', M(rep.profit), { bold: true });
     y += 3;
+
+    var tr = rep.transit;
+    if (tr && tr.mode === 'transit' && tr.rows.length) {
+      section('Spendenaktionen: durchlaufende Posten (nicht in der EÜR)');
+      tr.rows.forEach(function (x) {
+        row(D(x.date) + ' – ' + x.name + (x.beneficiary ? ' (Begünstigte/r: ' + x.beneficiary + ')' : '') + ': gesammelt ' + M(x.collected) + ', weitergeleitet ' + M(x.payout), 'Anteil ' + M(x.share), { rule: true });
+      });
+      row('Gesammelt insgesamt', M(tr.collected), { rule: true });
+      row('davon an die Begünstigten weitergeleitet (durchlaufende Posten)', M(tr.payout), { rule: true });
+      row('davon eigener Anteil (in den Betriebseinnahmen enthalten)', M(tr.share), { bold: true });
+      para('Die Spendenaktionen laufen im Namen und für Rechnung der jeweiligen Begünstigten; der vertraglich vereinbarte Anteil (Produktionspauschale) ist Betriebseinnahme. Die an die Begünstigten weitergeleiteten Beträge sind durchlaufende Posten (§ 4 Abs. 3 Satz 2 EStG, § 10 Abs. 1 UStG) und weder Betriebseinnahme noch Betriebsausgabe noch Umsatz.');
+    }
 
     if (rep.afaRows.length) {
       section('Anlagenverzeichnis (Wirtschaftsgüter über 800 € netto)');
@@ -982,6 +1026,7 @@ var Core = (function () {
       'Ausgaben in FCFA sind zum festen Kurs 1 € = 655,957 FCFA umgerechnet.',
       rep.homeoffice.ded ? 'Homeoffice-Pauschale: 6 € je Tag, höchstens 210 Tage (1.260 €) je Jahr, nicht neben einem häuslichen Arbeitszimmer.' : '',
       rep.missingReceipts.length ? rep.missingReceipts.length + ' Ausgabe(n) ohne hinterlegten Beleg.' : 'Für alle Ausgaben ist ein Beleg vermerkt.',
+      tr && tr.mode === 'transit' && tr.missingProof ? tr.missingProof + ' Auszahlung(en) an Begünstigte noch ohne hinterlegten Nachweis.' : '',
       'Diese Aufstellung dient der Vorbereitung der Anlage EÜR und ersetzt keine Steuerberatung.'
     ].filter(Boolean);
     pdf.setFont('helvetica', 'normal'); pdf.setFontSize(9); pdf.setTextColor.apply(pdf, ink);
@@ -1127,10 +1172,13 @@ var Core = (function () {
     kv('Begünstigte(r)', 'Bénéficiaire', c.beneficiary + (c.address ? '\n' + c.address : ''));
     kv('Auszahlung', 'Reversement', [fmtDate(c.payoutDate, 'de'), c.payoutMethod].filter(Boolean).join(' · '));
     pdf.setFont('helvetica', 'normal'); pdf.setFontSize(8.5); pdf.setTextColor.apply(pdf, muted);
-    [
+    (c.transit ? [
+      'Nur die Produktionspauschale ist Betriebseinnahme. Der an die Begünstigten weitergeleitete Betrag ist ein durchlaufender Posten (§ 4 Abs. 3 Satz 2 EStG).',
+      'Seuls les frais de production sont une recette. Le montant reversé au bénéficiaire est de l’argent qui transite.'
+    ] : [
       'Der eingegangene Betrag ist als Betriebseinnahme erfasst, die Auszahlung an die Begünstigten als Betriebsausgabe.',
       'Le montant reçu est enregistré en recette, le reversement au bénéficiaire en dépense.'
-    ].forEach(function (t) { var ls = pdf.splitTextToSize(P(t), 170); pdf.text(ls, 20, y); y += ls.length * 4 + 1.5; });
+    ]).forEach(function (t) { var ls = pdf.splitTextToSize(P(t), 170); pdf.text(ls, 20, y); y += ls.length * 4 + 1.5; });
     pdf.setFontSize(7.2);
     pdf.text(P('Erstellt mit KABA BOY Compta am ' + fmtDate(c.createdOn, 'de')), 20, 289);
     return pdf;
@@ -1224,7 +1272,7 @@ var Core = (function () {
   }
 
   return {
-    CATS: CATS, INCOME_CATS: INCOME_CATS, METHODS: METHODS, T: T,
+    CATS: CATS, INCOME_CATS: INCOME_CATS, METHODS: METHODS, T: T, SHARE_CAT: SHARE_CAT, collectMode: collectMode, collectSplit: collectSplit,
     todayISO: todayISO, addDays: addDays, num: num, r2: r2, rc: rc, money: money, fmtNum: fmtNum, fmtDate: fmtDate, fmtDateFr: fmtDateFr,
     monthLabelFr: monthLabelFr, fmtIban: fmtIban, catByKey: catByKey, incCatByKey: incCatByKey,
     docTotals: docTotals, nextNumber: nextNumber, docStatus: docStatus, mandatoryCheck: mandatoryCheck, eurOfInvoice: eurOfInvoice,
@@ -1244,7 +1292,7 @@ var Core = (function () {
   var DEFAULTS = {
     name: '', company: '', street: '', zip: '', city: '', country: 'Deutschland', email: '', phone: '', web: '',
     taxId: '', vatId: '', ku: true, vatRate: 19, bankHolder: '', bank: '', iban: '', bic: '',
-    invoicePrefix: 'RE', quotePrefix: 'AN', paymentDays: 14, quoteDays: 30, lang: 'de', currency: 'EUR', logo: '', homeoffice: {}
+    invoicePrefix: 'RE', quotePrefix: 'AN', paymentDays: 14, quoteDays: 30, lang: 'de', currency: 'EUR', logo: '', homeoffice: {}, collectMode: 'transit'
   };
   var COLLS = ['clients', 'docs', 'expenses', 'incomes', 'subs'];
   var S = {
@@ -1914,7 +1962,7 @@ var Core = (function () {
     var c = C.catByKey(e.category), isKm = c.key === 'car_km', hasR = isKm || !!(e.receiptId || e.receiptKept), pct = C.expPct(e);
     var extra = isKm && e.km ? '<span>' + h(C.fmtNum(e.km, 'fr')) + ' km</span>' : e.cur === 'XAF' && e.orig ? '<span>' + h(C.money(e.orig, 'XAF', 'fr')) + '</span>' : '';
     return '<button class="item" data-act="exp" data-id="' + h(e.id) + '"><span class="lead">' + ic(isKm ? 'car' : 'arrowOut') + '</span><div class="item-main"><div class="item-t">' + h(e.vendor || e.payee || e.desc || c.fr) + '</div>' +
-      '<div class="item-s"><span>' + h(C.fmtDateFr(e.date)) + '</span><span>' + h(c.fr.split(' (')[0]) + '</span>' + extra + (pct < 100 ? '<span>' + pct + ' % pro</span>' : '') + (e.rc13b ? '<span>§ 13b</span>' : '') + (e.subId ? '<span>Abonnement</span>' : '') + (e.example ? '<span class="tag">Exemple</span>' : '') + '</div></div>' +
+      '<div class="item-s"><span>' + h(C.fmtDateFr(e.date)) + '</span><span>' + h(c.fr.split(' (')[0]) + '</span>' + extra + (pct < 100 ? '<span>' + pct + ' % pro</span>' : '') + (e.rc13b ? '<span>§ 13b</span>' : '') + (e.subId ? '<span>Abonnement</span>' : '') + (e.category === 'payout' && isTransitExp(e) ? '<span>Transite · non déductible</span>' : '') + (e.example ? '<span class="tag">Exemple</span>' : '') + '</div></div>' +
       '<div class="item-r"><span class="amt out">−' + h(eur(e.amount)) + '</span>' + (isKm ? '<span class="pill">Trajet</span>' : hasR ? '<span class="pill ok">' + (e.signedReceipt ? 'Reçu signé' : 'Justificatif') + '</span>' : '<span class="pill warn">Sans justificatif</span>') + '</div></button>';
   }
   function incRow(e) {
@@ -1924,9 +1972,11 @@ var Core = (function () {
       var ex = col.expenseId ? S.expenses.find(function (x) { return x.id === col.expenseId; }) : null;
       pill = ex && (ex.receiptId || ex.receiptKept) ? '<span class="pill ok">' + (ex.dischargeNo ? 'Décharge signée' : 'Justificatif ajouté') + '</span>' : ex ? '<span class="pill warn">Décharge à signer</span>' : '';
     }
+    var cv = col ? collectView(e) : null, tr = col && transitOn();
+    var sub = col ? (tr ? 'Collecté ' + eur(cv.collected) + ' · ' + (cv.paid ? eur(cv.paid) + ' reversés' : 'rien de reversé') : (e.source || 'Collecte') + ' · ' + C.fmtNum(cv.pct, 'fr') + ' % reversés') : c.fr.split(' (')[0];
     return '<button class="item" data-act="inc" data-id="' + h(e.id) + '"><span class="lead in">' + ic(col ? 'heart' : 'arrowIn') + '</span><div class="item-main"><div class="item-t">' + h(col ? col.name : (e.source || e.desc || c.fr)) + '</div>' +
-      '<div class="item-s"><span>' + h(C.fmtDateFr(e.date)) + '</span><span>' + h(col ? (e.source || 'Collecte') + ' · ' + C.fmtNum(col.pct, 'fr') + ' % reversés' : c.fr.split(' (')[0]) + '</span>' + (e.example ? '<span class="tag">Exemple</span>' : '') + '</div></div>' +
-      '<div class="item-r"><span class="amt in">+' + h(eur(e.amount)) + '</span>' + pill + '</div></button>';
+      '<div class="item-s"><span>' + h(C.fmtDateFr(e.date)) + '</span><span>' + h(sub) + '</span>' + (e.example ? '<span class="tag">Exemple</span>' : '') + '</div></div>' +
+      '<div class="item-r"><span class="amt in">+' + h(eur(tr ? cv.share : e.amount)) + '</span>' + (tr ? '<span class="hint" style="margin:0">ta part</span>' : '') + pill + '</div></button>';
   }
 
   function seg(key, opts) {
@@ -2045,8 +2095,17 @@ var Core = (function () {
 
     var incRows = '<div class="tbl-row"><span>Factures payées<small>Umsätze aus Rechnungen</small></span><b>' + h(eur(rep.byType.invoice)) + '</b></div>';
     INCOME_CATS.forEach(function (ic2) { if (rep.byType[ic2.key]) incRows += '<div class="tbl-row"><span>' + h(ic2.fr) + '<small>' + h(ic2.de) + '</small></span><b>' + h(eur(rep.byType[ic2.key])) + '</b></div>'; });
+    if (rep.byType.collectShare) incRows += '<div class="tbl-row"><span>' + h(C.SHARE_CAT.fr) + '<small>' + h(C.SHARE_CAT.de) + '</small></span><b>' + h(eur(rep.byType.collectShare)) + '</b></div>';
     incRows += '<div class="tbl-row sum"><span><b>Total des recettes</b><small>' + (c.ku ? 'Betriebseinnahmen als Kleinunternehmer (§ 19 UStG)' : 'Betriebseinnahmen') + '</small></span><b>' + h(eur(rep.incomeTotal)) + '</b></div>';
     html += '<section class="sec"><div class="sec-h"><h2>Recettes</h2></div><div class="list">' + incRows + '</div></section>';
+    var tr = rep.transit;
+    if (tr && tr.mode === 'transit' && tr.rows.length) {
+      html += '<section class="sec"><div class="sec-h"><h2>Argent qui transite</h2></div><div class="list">' +
+        '<div class="tbl-row"><span>Collecté pour les familles<small>' + tr.rows.length + ' collecte' + (tr.rows.length > 1 ? 's' : '') + ' en ' + y + '</small></span><b>' + h(eur(tr.collected)) + '</b></div>' +
+        '<div class="tbl-row"><span>Reversé aux familles<small>Durchlaufende Posten · ni recette ni dépense</small></span><b>− ' + h(eur(tr.payout)) + '</b></div>' +
+        '<div class="tbl-row sum"><span><b>Ta part</b><small>Déjà comptée dans tes recettes</small></span><b>' + h(eur(tr.share)) + '</b></div></div>' +
+        '<p class="hint">Les collectes sont faites au nom des familles : seule ta part prévue par le contrat compte (§ 4 Abs. 3 Satz 2 EStG). Garde le contrat et la preuve de chaque reversement' + (tr.missingProof ? ' : il en manque ' + tr.missingProof + '.' : '.') + ' À faire valider par un Steuerberater. Le mode se change dans Réglages › Mes informations.</p></section>';
+    }
 
     var expRows = rep.expenseCats.map(function (x) {
       return '<div class="tbl-row"><span>' + h(x.cat.fr) + '<small>' + h(x.cat.de) + (x.ded !== x.gross ? ' · payé ' + eur(x.gross) : '') + '</small></span><b>' + h(eur(x.ded)) + '</b></div>';
@@ -3157,7 +3216,28 @@ var Core = (function () {
   }
 
   /* ---------- crowdfunding collections ---------- */
-  function collectNumbers(cur, amountEur, orig, pct) {
+  function transitOn() { return C.collectMode(cfg()) === 'transit'; }
+  function expMap() { var m = {}; S.expenses.forEach(function (e) { m[e.id] = e; }); return m; }
+  // what came in, what went to the family, what stays with Kevin (linked payout expense wins over stored numbers)
+  function collectView(inc) {
+    var c = inc.collect || {}, sp = C.collectSplit(inc, expMap());
+    return { collected: sp.collected, paid: sp.paid, share: sp.share, pct: sp.collected ? C.r2(sp.paid * 100 / sp.collected) : C.num(c.pct) };
+  }
+  function isTransitExp(e) {
+    if (!transitOn()) return false;
+    if (e.collectIncomeId && S.incomes.some(function (i) { return i.id === e.collectIncomeId && i.collect; })) return true;
+    return S.incomes.some(function (i) { return i.collect && i.collect.expenseId === e.id; });
+  }
+  function collectNumbers(cur, amountEur, orig, pct, fixed) {
+    if (fixed != null && fixed !== '' && isFinite(C.num(fixed))) {
+      var f = Math.max(0, C.num(fixed));
+      if (cur === 'XAF' && orig) {
+        var po = Math.min(Math.round(f), orig), pe = C.r2(po / C.XAF_RATE);
+        return { pct: C.r2(po * 100 / orig), payout: pe, fee: C.r2(amountEur - pe), payoutOrig: po, feeOrig: orig - po, fixed: true };
+      }
+      var pay = C.r2(Math.min(f, amountEur));
+      return { pct: amountEur ? C.r2(pay * 100 / amountEur) : 0, payout: pay, fee: C.r2(amountEur - pay), payoutOrig: null, feeOrig: null, fixed: true };
+    }
     var p = Math.min(100, Math.max(0, C.num(pct)));
     var payout = C.r2(amountEur * p / 100), fee = C.r2(amountEur - payout);
     var payoutOrig = null, feeOrig = null;
@@ -3171,16 +3251,16 @@ var Core = (function () {
     var r = {
       name: col.name || '', source: inc ? inc.source : (s.collectSource || 'Tumetscombien'), date: inc ? inc.date : today(),
       cur: inc && inc.cur === 'XAF' ? 'XAF' : 'EUR', amount: inc ? C.num(inc.amount) : 0, orig: inc && inc.orig ? inc.orig : null,
-      pct: col.pct != null ? col.pct : (s.collectPct != null ? s.collectPct : 55),
+      pct: col.pct != null ? col.pct : (s.collectPct != null ? s.collectPct : 55), fixed: col.payoutFixed != null ? col.payoutFixed : null,
       beneficiary: col.beneficiary || '', address: col.address || '', payoutDate: col.payoutDate || (inc ? inc.date : today()), payoutMethod: col.payoutMethod || 'Mobile Money'
     };
     function sumHTML() {
       if (!(r.amount > 0)) return '<span class="hint" style="margin:0">Indique le montant reçu pour voir la répartition.</span>';
-      var n = collectNumbers(r.cur, r.amount, r.orig, r.pct);
+      var n = collectNumbers(r.cur, r.amount, r.orig, r.pct, r.fixed), tr = transitOn();
       var x = function (v, o) { return eur2(v) + (o != null ? ' · ' + C.money(o, 'XAF', 'fr') : ''); };
-      return '<div><span>Recette</span><span>' + h(x(r.amount, r.cur === 'XAF' ? r.orig : null)) + '</span></div>' +
-        '<div><span>Reversé au bénéficiaire (' + C.fmtNum(n.pct, 'fr') + ' %)</span><span>' + h(x(n.payout, n.payoutOrig)) + '</span></div>' +
-        '<div class="grand"><span>Tes frais de production</span><span>' + h(eur2(n.fee)) + '</span></div>';
+      return '<div><span>' + (tr ? 'Collecté (transite)' : 'Recette') + '</span><span>' + h(x(r.amount, r.cur === 'XAF' ? r.orig : null)) + '</span></div>' +
+        '<div><span>Reversé ' + (tr ? 'à la famille' : 'au bénéficiaire') + ' (' + C.fmtNum(n.pct, 'fr') + ' %)</span><span>' + h(x(n.payout, n.payoutOrig)) + '</span></div>' +
+        '<div class="grand"><span>' + (tr ? 'Ta part · ton chiffre d’affaires' : 'Tes frais de production') + '</span><span>' + h(eur2(n.fee)) + '</span></div>';
     }
     var spec = openSheet({
       render: function () {
@@ -3190,15 +3270,17 @@ var Core = (function () {
           '<div class="grid2">' + fld('k-amount', r.cur === 'XAF' ? 'Montant reçu (FCFA)' : 'Montant reçu (€)', r.cur === 'XAF' ? (r.orig || '') : (r.amount ? C.fmtNum(r.amount, 'fr') : ''), { mode: 'decimal', ph: '0,00' }) +
           fld('k-date', 'Date du virement', r.date, { type: 'date' }) + '</div>' +
           sel('k-cur', 'Devise', r.cur, [['EUR', 'Euro (€)'], ['XAF', 'Franc CFA (FCFA)']]) +
-          fld('k-pct', 'Part reversée au bénéficiaire (%)', r.pct, { type: 'number', mode: 'decimal', hint: 'Le reste correspond à tes frais de production.' }) +
+          '<div class="grid2">' + fld('k-pct', 'Part reversée (%)', r.pct, { type: 'number', mode: 'decimal' }) +
+          fld('k-fixed', r.cur === 'XAF' ? 'ou montant reversé (FCFA)' : 'ou montant reversé (€)', r.fixed != null ? (r.cur === 'XAF' ? r.fixed : C.fmtNum(r.fixed, 'fr')) : '', { mode: 'decimal', ph: 'vide = selon le %' }) + '</div>' +
+          '<p class="hint" style="margin-top:-4px">Le montant, s’il est rempli, remplace le pourcentage. Le reste correspond à tes frais de production.</p>' +
           '<div class="totals" id="k-sum">' + sumHTML() + '</div>' +
           '<div class="fs"><h3>Bénéficiaire</h3>' + fld('k-ben', 'Nom', r.beneficiary, { ph: 'Ex. Mme Ngo Bayiha' }) +
           fld('k-addr', 'Adresse', r.address, { type: 'textarea', ph: 'Ex. Quartier Mvog-Mbi, Yaoundé, Cameroun' }) +
           '<div class="grid2">' + fld('k-pdate', 'Date du reversement', r.payoutDate, { type: 'date' }) + sel('k-pmethod', 'Reversé par', r.payoutMethod, METHODS.map(function (m) { return [m, m]; })) + '</div></div>' +
-          '<p class="hint">L’appli crée la recette (montant total) et la dépense de reversement. Ensuite, tu peux faire signer la décharge au bénéficiaire.</p>' +
+          '<p class="hint">' + (transitOn() ? 'Seule ta part compte dans ton chiffre d’affaires : le reste transite pour la famille. Garde le contrat et fais signer la décharge du reversement.' : 'L’appli crée la recette (montant total) et la dépense de reversement. Ensuite, tu peux faire signer la décharge au bénéficiaire.') + '</p>' +
           '<div class="err" id="k-err" role="alert"></div><button class="btn primary block" data-a="save">' + (inc ? 'Enregistrer les modifications' : 'Enregistrer la collecte') + '</button></div>', saveBtn());
       },
-      onInput: function (e) { if (/^k-(amount|pct)$/.test(e.target.id)) { readForm(spec.el); var b = spec.el.querySelector('#k-sum'); if (b) b.innerHTML = sumHTML(); } },
+      onInput: function (e) { if (/^k-(amount|pct|fixed)$/.test(e.target.id)) { readForm(spec.el); var b = spec.el.querySelector('#k-sum'); if (b) b.innerHTML = sumHTML(); } },
       onChange: function (e) { if (e.target.id === 'k-cur') { readForm(spec.el); drawSheet(spec); } },
       onClick: function (e) { if (e.target.closest('[data-a="save"]')) save(); }
     });
@@ -3211,6 +3293,7 @@ var Core = (function () {
       if ((v = g('k-cur')) != null && v !== r.cur) { if (v === 'XAF') { r.orig = r.amount ? Math.round(r.amount * C.XAF_RATE) : null; } else { r.orig = null; } r.cur = v; }
       if ((v = g('k-date')) != null) r.date = v;
       if ((v = g('k-pct')) != null) r.pct = Math.min(100, Math.max(0, C.num(v)));
+      if ((v = g('k-fixed')) != null) r.fixed = String(v).trim() === '' ? null : Math.max(0, C.num(v));
       if ((v = g('k-ben')) != null) r.beneficiary = v.trim();
       if ((v = g('k-addr')) != null) r.address = v.trim();
       if ((v = g('k-pdate')) != null) r.payoutDate = v;
@@ -3223,7 +3306,7 @@ var Core = (function () {
       if (!(r.amount > 0)) { err.textContent = 'Indique le montant reçu.'; return; }
       if (!r.date) { err.textContent = 'Indique la date du virement.'; return; }
       if (!r.beneficiary) { err.textContent = 'Indique le nom du bénéficiaire.'; return; }
-      var n = collectNumbers(r.cur, r.amount, r.orig, r.pct);
+      var n = collectNumbers(r.cur, r.amount, r.orig, r.pct, r.fixed);
       var oldExp = inc && inc.collect && inc.collect.expenseId ? S.expenses.find(function (x) { return x.id === inc.collect.expenseId; }) : null;
       var expId = oldExp ? oldExp.id : uid(), incId = inc ? inc.id : uid();
       var expense = Object.assign(oldExp ? clone(oldExp) : { proPct: 100 }, {
@@ -3233,14 +3316,14 @@ var Core = (function () {
       if (n.payoutOrig != null) expense.orig = n.payoutOrig; else delete expense.orig;
       var income = Object.assign(inc ? clone(inc) : {}, {
         id: incId, date: r.date, source: r.source, desc: 'Collecte « ' + r.name + ' »', category: 'crowdfunding', amount: r.amount, method: 'Virement',
-        cur: r.cur, collect: { name: r.name, pct: n.pct, payout: n.payout, fee: n.fee, beneficiary: r.beneficiary, address: r.address, payoutDate: r.payoutDate, payoutMethod: r.payoutMethod, expenseId: expId }
+        cur: r.cur, collect: { name: r.name, pct: n.pct, payout: n.payout, fee: n.fee, payoutFixed: r.fixed != null ? r.fixed : undefined, beneficiary: r.beneficiary, address: r.address, payoutDate: r.payoutDate, payoutMethod: r.payoutMethod, expenseId: expId }
       });
       if (r.cur === 'XAF') income.orig = r.orig; else delete income.orig;
       var btns = el.querySelectorAll('[data-a="save"]'); btns.forEach(function (b) { b.disabled = true; });
       var pending = n.payout > 0 ? put('expenses', expense) : (oldExp ? remove('expenses', oldExp.id) : Promise.resolve());
       pending.then(function () { return put('incomes', income); }).then(function () {
         var patch = {};
-        if (s.collectPct !== n.pct) patch.collectPct = n.pct;
+        if (r.fixed == null && s.collectPct !== n.pct) patch.collectPct = n.pct;
         if (r.source && s.collectSource !== r.source) patch.collectSource = r.source;
         return Object.keys(patch).length ? saveSettings(patch).catch(function () {}) : null;
       }).then(function () {
@@ -3252,9 +3335,10 @@ var Core = (function () {
   }
 
   function decompteData(inc) {
-    var c = inc.collect || {}, n = collectNumbers(inc.cur, C.num(inc.amount), inc.orig, c.pct);
+    var c = inc.collect || {}, n = collectNumbers(inc.cur, C.num(inc.amount), inc.orig, c.pct, c.payoutFixed), v = collectView(inc);
+    if (Math.abs(v.paid - n.payout) > 0.004) n = collectNumbers(inc.cur, C.num(inc.amount), inc.orig, c.pct, inc.cur === 'XAF' && inc.orig ? Math.round(v.paid * C.XAF_RATE) : v.paid);
     return {
-      name: c.name, source: inc.source, date: inc.date, amount: C.num(inc.amount), amountOrig: inc.cur === 'XAF' ? inc.orig : null,
+      transit: transitOn(), name: c.name, source: inc.source, date: inc.date, amount: C.num(inc.amount), amountOrig: inc.cur === 'XAF' ? inc.orig : null,
       pct: n.pct, payout: n.payout, payoutOrig: n.payoutOrig, fee: n.fee, feeOrig: n.feeOrig,
       beneficiary: c.beneficiary, address: c.address, payoutDate: c.payoutDate, payoutMethod: c.payoutMethod, createdOn: today()
     };
@@ -3265,7 +3349,8 @@ var Core = (function () {
       render: function () {
         var inc = S.incomes.find(function (x) { return x.id === incomeId; });
         if (!inc) return shell('Collecte', '<div class="empty"><b>Collecte supprimée</b></div>');
-        var c = inc.collect || {}, n = collectNumbers(inc.cur, C.num(inc.amount), inc.orig, c.pct);
+        var c = inc.collect || {}, v = collectView(inc), tr = transitOn();
+        var n = { pct: v.pct, payout: v.paid, fee: v.share, payoutOrig: inc.cur === 'XAF' && inc.orig ? Math.round(v.paid * C.XAF_RATE) : null };
         var exp = c.expenseId ? S.expenses.find(function (x) { return x.id === c.expenseId; }) : null;
         var signed = exp && (exp.receiptId || exp.receiptKept);
         var x = function (v, o) { return eur2(v) + (o != null ? ' · ' + C.money(o, 'XAF', 'fr') : ''); };
@@ -3278,12 +3363,12 @@ var Core = (function () {
           '<button class="btn danger" data-a="del">' + ic('trash') + 'Supprimer</button>';
         return shell(c.name || 'Collecte',
           '<div class="doc-sum"><div><span class="pill ' + (signed ? 'ok' : exp ? 'warn' : 'accent') + '">' + (signed ? (exp.dischargeNo ? 'Décharge signée' : 'Justificatif ajouté') : exp ? 'Décharge à faire signer' : 'Sans reversement') + '</span>' +
-          '<div class="big" style="margin-top:10px">' + h(eur2(inc.amount)) + '</div><div class="who">' + h(inc.source || 'Collecte') + ' · reçu le ' + h(C.fmtDateFr(inc.date)) + '</div></div></div>' +
+          '<div class="big" style="margin-top:10px">' + h(eur2(tr ? n.fee : inc.amount)) + '</div><div class="who">' + (tr ? 'Ta part sur ' + h(eur2(inc.amount)) + ' collectés · ' : '') + h(inc.source || 'Collecte') + ' · reçu le ' + h(C.fmtDateFr(inc.date)) + '</div></div></div>' +
           '<div class="doc-actions">' + acts + '</div>' +
           '<section class="sec"><div class="sec-h"><h2>Répartition</h2></div><div class="list">' +
-          '<div class="tbl-row"><span>Montant reçu<small>Recette · Collectes</small></span><b>' + h(x(inc.amount, inc.cur === 'XAF' ? inc.orig : null)) + '</b></div>' +
-          '<div class="tbl-row"><span>Reversé à ' + h(c.beneficiary || 'bénéficiaire') + ' (' + C.fmtNum(n.pct, 'fr') + ' %)<small>Dépense · le ' + h(C.fmtDateFr(c.payoutDate)) + (c.payoutMethod ? ' · ' + h(c.payoutMethod) : '') + '</small></span><b>− ' + h(x(n.payout, n.payoutOrig)) + '</b></div>' +
-          '<div class="tbl-row sum"><span><b>Tes frais de production</b><small>' + C.fmtNum(100 - n.pct, 'fr') + ' % · ce qui reste dans ton bénéfice</small></span><b>' + h(eur2(n.fee)) + '</b></div></div></section>' +
+          '<div class="tbl-row"><span>' + (tr ? 'Collecté' : 'Montant reçu') + '<small>' + (tr ? 'Argent qui transite · pas une recette' : 'Recette · Collectes') + '</small></span><b>' + h(x(inc.amount, inc.cur === 'XAF' ? inc.orig : null)) + '</b></div>' +
+          '<div class="tbl-row"><span>Reversé à ' + h(c.beneficiary || 'bénéficiaire') + ' (' + C.fmtNum(n.pct, 'fr') + ' %)<small>' + (tr ? 'Pas une dépense' : 'Dépense') + ' · le ' + h(C.fmtDateFr(c.payoutDate)) + (c.payoutMethod ? ' · ' + h(c.payoutMethod) : '') + '</small></span><b>− ' + h(x(n.payout, n.payoutOrig)) + '</b></div>' +
+          '<div class="tbl-row sum"><span><b>' + (tr ? 'Ta part' : 'Tes frais de production') + '</b><small>' + C.fmtNum(C.r2(100 - n.pct), 'fr') + ' % · ' + (tr ? 'compte dans ton chiffre d’affaires' : 'ce qui reste dans ton bénéfice') + '</small></span><b>' + h(eur2(n.fee)) + '</b></div></div></section>' +
           '<p class="hint">Garde aussi la preuve du reversement (capture Mobile Money, LemFi ou virement) et le contrat de participation signé.</p>',
           '<button class="btn sm" data-a="edit">' + ic('edit') + 'Modifier</button>');
       },
@@ -3305,7 +3390,7 @@ var Core = (function () {
           sheetQuittung(target, function () {
             var out = clone(target); delete out.uploading;
             put('expenses', out).then(function () { toast('Décharge signée jointe au reversement.'); }, function () {});
-          }, { kind: 'discharge', name: c.beneficiary, address: c.address, work: 'Reversement de ma part (' + C.fmtNum(c.pct, 'fr') + ' %) de la collecte « ' + c.name + ' »' + (inc.source ? ' sur ' + inc.source : ''), date: c.payoutDate, method: c.payoutMethod });
+          }, { kind: 'discharge', name: c.beneficiary, address: c.address, work: 'Reversement de ma part (' + C.fmtNum(collectView(inc).pct, 'fr') + ' %) de la collecte « ' + c.name + ' »' + (inc.source ? ' sur ' + inc.source : ''), date: c.payoutDate, method: c.payoutMethod });
         }
         else if (a === 'del') {
           confirmBox('Supprimer cette collecte ?', 'La recette et la dépense de reversement seront supprimées.', 'Supprimer').then(function (ok) {
@@ -3422,7 +3507,8 @@ var Core = (function () {
           fld('st-country', 'Pays', r.country) + '<div class="grid2 wrap1">' + fld('st-email', 'E-mail', r.email, { type: 'email', auto: 'email' }) + fld('st-phone', 'Téléphone', r.phone, { type: 'tel', auto: 'tel' }) + '</div>' + fld('st-web', 'Site ou page (facultatif)', r.web) + '</div>' +
           '<div class="fs"><h3>Impôts</h3>' + fld('st-tax', 'Numéro fiscal (Steuernummer)', r.taxId, { ph: 'Ex. 12/345/67890', hint: 'Obligatoire sur chaque facture (ou ton n° de TVA).' }) + fld('st-vat', 'N° de TVA intracommunautaire (USt-IdNr., facultatif)', r.vatId) +
           '<label class="toggle"><input type="checkbox" id="st-ku"' + (r.ku ? ' checked' : '') + '><span>Kleinunternehmer (§ 19 UStG)<small>Pas de TVA sur tes factures ; la mention légale est ajoutée toute seule.</small></span></label>' +
-          fld('st-rate', 'Taux de TVA si tu n’es pas Kleinunternehmer (%)', r.vatRate, { mode: 'decimal' }) + '</div>' +
+          fld('st-rate', 'Taux de TVA si tu n’es pas Kleinunternehmer (%)', r.vatRate, { mode: 'decimal' }) +
+          sel('st-cm', 'Collectes (KABA BOY CARE)', C.collectMode(r), [['transit', 'Seule ma part compte (argent qui transite)'], ['full', 'Tout le montant collecté compte en recette']]) + '</div>' +
           '<div class="fs"><h3>Banque (pied de page des factures)</h3>' + fld('st-holder', 'Titulaire du compte (si différent)', r.bankHolder) + fld('st-iban', 'IBAN', r.iban, { ph: 'DE00 0000 0000 0000 0000 00' }) +
           '<div class="grid2">' + fld('st-bic', 'BIC', r.bic) + fld('st-bank', 'Banque', r.bank) + '</div></div>' +
           '<div class="fs"><h3>Factures et devis</h3><div class="grid2">' + fld('st-ip', 'Préfixe des factures', r.invoicePrefix) + fld('st-qp', 'Préfixe des devis', r.quotePrefix) + '</div>' +
@@ -3439,7 +3525,7 @@ var Core = (function () {
           bankHolder: val(el, 'st-holder').trim(), iban: val(el, 'st-iban').replace(/\s+/g, '').toUpperCase(), bic: val(el, 'st-bic').trim().toUpperCase(), bank: val(el, 'st-bank').trim(),
           invoicePrefix: val(el, 'st-ip').trim() || 'RE', quotePrefix: val(el, 'st-qp').trim() || 'AN',
           paymentDays: Math.max(0, Math.round(C.num(val(el, 'st-pd')))) || 14, quoteDays: Math.max(1, Math.round(C.num(val(el, 'st-qd')))) || 30,
-          lang: val(el, 'st-lang'), currency: val(el, 'st-cur')
+          lang: val(el, 'st-lang'), currency: val(el, 'st-cur'), collectMode: val(el, 'st-cm') === 'full' ? 'full' : 'transit'
         };
         saveSettings(p).then(function () { closeSheet(); toast('Informations enregistrées.'); }, function () {});
       }
