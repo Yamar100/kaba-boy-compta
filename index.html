@@ -186,6 +186,28 @@ svg.ic { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-wid
 .chart .grid { stroke: var(--line); stroke-width: 1; }
 .chart .b-in { fill: var(--accent); }
 .chart .b-out { fill: var(--series-2); }
+.chart .b-in, .chart .b-out { transition: opacity .15s; }
+.chart .dim { opacity: .3; }
+.chart .selbg { fill: var(--surface-2); }
+.chart text.sel, .chart text.now { fill: var(--accent); font-weight: 700; }
+.chart .hit { fill: transparent; pointer-events: all; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.chart .hit:focus { outline: none; }
+.month-now { margin-top: 10px; background: var(--surface); border: 1px solid var(--line) !important; border-radius: var(--r); }
+.month-now .item-s .amt { font-size: .86rem; }
+.mnav { display: flex; gap: 4px; margin-left: auto; }
+.mbal { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; margin-top: 10px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r); }
+.mbal span { color: var(--ink-2); font-size: .86rem; }
+.mbal b { font-variant-numeric: tabular-nums; font-size: 1.1rem; }
+.mbal b.neg { color: var(--bad); }
+.mbar { height: 4px; background: var(--surface-2); border-radius: 2px; margin-top: 7px; overflow: hidden; }
+.mbar i { display: block; height: 100%; background: var(--series-2); border-radius: 2px; }
+.mcat.in .mbar i { background: var(--accent); }
+.mcat .chev { color: var(--ink-2); display: grid; place-items: center; margin-left: -4px; }
+.mcat .chev svg { width: 18px; height: 18px; transition: transform .15s; }
+.mcat[aria-expanded="true"] .chev svg { transform: rotate(90deg); }
+.msub { background: var(--bg); border-top: 1px solid var(--line); }
+.msub .item { padding-left: 62px; min-height: 52px; }
+.msub .item-t { font-weight: 550; font-size: .94rem; }
 .legend { display: flex; gap: 14px; font-size: .78rem; color: var(--ink-2); margin-bottom: 6px; }
 .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
 
@@ -1346,6 +1368,7 @@ var Core = (function () {
     list: '<path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.5" cy="6" r="1"/><circle cx="4.5" cy="12" r="1"/><circle cx="4.5" cy="18" r="1"/>',
     sign: '<path d="M3 19c3-1 4-6 6-6s1 4 3 4 3-3 4-3 1 2 2 2h3"/><path d="M14 4l4 4-7 7H7v-4z"/>',
     heart: '<path d="M12 20s-7-4.4-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 10c0 5.6-7 10-7 10z"/>',
+    calendar: '<rect x="4" y="5.5" width="16" height="14.5" rx="2.5"/><path d="M4 10h16M8.5 3.5v4M15.5 3.5v4"/>',
     mail: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3.5 6.5L12 13l8.5-6.5"/>'
   };
   function ic(n) { return '<svg class="ic" viewBox="0 0 24 24" aria-hidden="true">' + IC[n] + '</svg>'; }
@@ -1862,7 +1885,9 @@ var Core = (function () {
     for (var i = 0; i < steps.length; i++) if (steps[i] * p >= v) return steps[i] * p;
     return 10 * p;
   }
-  function chartSVG(rep) {
+  function chartSVG(rep, o) {
+    o = o || {};
+    var sel = o.sel != null ? o.sel : -1, now = o.now != null ? o.now : -1;
     var max = 0;
     rep.months.forEach(function (m) { max = Math.max(max, m.in, m.out); });
     var top = niceMax(max);
@@ -1876,11 +1901,15 @@ var Core = (function () {
       if (f > 0) out += '<text x="' + x0 + '" y="' + (y - 4).toFixed(1) + '">' + h(eur(top * f).replace(',00', '')) + '</text>';
     });
     var L = 'JFMAMJJASOND';
+    if (sel >= 0) out += '<rect class="selbg" x="' + (x0 + gw * sel + 1).toFixed(1) + '" y="' + (y0 - 8) + '" width="' + (gw - 2).toFixed(1) + '" height="' + (H - y0 + 6) + '" rx="6"/>';
     rep.months.forEach(function (m, i) {
-      var cx = x0 + gw * i + gw / 2;
-      if (m.in > 0) out += '<rect class="b-in" x="' + (cx - bw - 1).toFixed(1) + '" y="' + sy(m.in).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + (y1 - sy(m.in)).toFixed(1) + '" rx="1.5"><title>' + h(C.monthLabelFr(rep.year + '-' + String(i + 1).padStart(2, '0')) + ' – recettes ' + eur(m.in)) + '</title></rect>';
-      if (m.out > 0) out += '<rect class="b-out" x="' + (cx + 1).toFixed(1) + '" y="' + sy(m.out).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + (y1 - sy(m.out)).toFixed(1) + '" rx="1.5"><title>' + h(C.monthLabelFr(rep.year + '-' + String(i + 1).padStart(2, '0')) + ' – dépenses ' + eur(m.out)) + '</title></rect>';
-      out += '<text x="' + cx.toFixed(1) + '" y="' + (H - 10) + '" text-anchor="middle">' + L[i] + '</text>';
+      var cx = x0 + gw * i + gw / 2, dim = sel >= 0 && i !== sel ? ' dim' : '';
+      if (m.in > 0) out += '<rect class="b-in' + dim + '" x="' + (cx - bw - 1).toFixed(1) + '" y="' + sy(m.in).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + (y1 - sy(m.in)).toFixed(1) + '" rx="1.5"><title>' + h(C.monthLabelFr(rep.year + '-' + String(i + 1).padStart(2, '0')) + ' – recettes ' + eur(m.in)) + '</title></rect>';
+      if (m.out > 0) out += '<rect class="b-out' + dim + '" x="' + (cx + 1).toFixed(1) + '" y="' + sy(m.out).toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + (y1 - sy(m.out)).toFixed(1) + '" rx="1.5"><title>' + h(C.monthLabelFr(rep.year + '-' + String(i + 1).padStart(2, '0')) + ' – dépenses ' + eur(m.out)) + '</title></rect>';
+      out += '<text x="' + cx.toFixed(1) + '" y="' + (H - 10) + '" text-anchor="middle"' + (i === sel ? ' class="sel"' : i === now ? ' class="now"' : '') + '>' + L[i] + '</text>';
+    });
+    if (o.tap) rep.months.forEach(function (m, i) {
+      out += '<rect class="hit" ' + o.tap + ' data-m="' + i + '" x="' + (x0 + gw * i).toFixed(1) + '" y="0" width="' + gw.toFixed(1) + '" height="' + H + '"><title>' + h(C.monthLabelFr(rep.year + '-' + String(i + 1).padStart(2, '0'))) + ' : voir le détail</title></rect>';
     });
     return out + '</svg>';
   }
@@ -1911,6 +1940,12 @@ var Core = (function () {
   function viewHome() {
     var y = S.year, t = today();
     var rep = C.euer(S, y);
+    var nowM = String(t).slice(0, 4) === String(y) ? Number(String(t).slice(5, 7)) - 1 : -1, nowCard = '';
+    if (nowM >= 0) {
+      var mm = rep.months[nowM];
+      nowCard = '<button class="item month-now" data-act="month" data-m="' + nowM + '"><span class="lead in">' + ic('calendar') + '</span><div class="item-main"><div class="item-t">Ce mois-ci · ' + h(C.monthLabelFr(y + '-' + String(nowM + 1).padStart(2, '0')).split(' ')[0].toLowerCase()) + '</div>' +
+        '<div class="item-s"><span class="amt in">' + h(signed(mm.in, '+')) + '</span><span>' + h(signed(mm.out, '−')) + '</span></div></div>' + ic('right') + '</button>';
+    }
     var inv = S.docs.filter(function (d) { return d.kind === 'invoice' && d.status !== 'paid'; });
     var late = inv.filter(function (d) { return d.dueDate && d.dueDate < t; });
     var sumOpen = function (list) { return list.filter(function (d) { return (d.currency || 'EUR') === 'EUR'; }).reduce(function (a, d) { return a + C.docTotals(d).total; }, 0); };
@@ -1943,7 +1978,8 @@ var Core = (function () {
       '<button class="btn" data-act="newexp">' + ic('arrowOut') + 'Dépense</button>' +
       '<button class="btn" data-act="newinc">' + ic('arrowIn') + 'Recette sans facture</button></div></section>' +
       '<section class="sec"><div class="sec-h"><h2>Mois par mois · ' + y + '</h2></div><div class="panel">' +
-      '<div class="legend"><span><i style="background:var(--accent)"></i>Recettes</span><span><i style="background:var(--series-2)"></i>Dépenses</span></div>' + chartSVG(rep) + '</div></section>' +
+      '<div class="legend"><span><i style="background:var(--accent)"></i>Recettes</span><span><i style="background:var(--series-2)"></i>Dépenses</span></div>' + chartSVG(rep, { tap: 'data-act="month"', now: nowM }) +
+      '<p class="hint" style="margin:6px 0 0">Touche un mois pour voir d’où vient l’argent et où il part.</p></div>' + nowCard + '</section>' +
       kuMeter(rep) +
       '<section class="sec"><div class="sec-h"><h2>Derniers mouvements</h2></div>' +
       ((S.docs.length + S.expenses.length + S.incomes.length) ? '<div class="list">' + movementRows(6) + '</div>' : emptyBox('Rien pour l’instant', 'Crée ta première facture ou ajoute une dépense.')) + '</section>';
@@ -2181,6 +2217,96 @@ var Core = (function () {
 
   /* ---------- sheets ---------- */
   var sheets = [];
+  /* ---------- month detail: where the money came from and where it went ---------- */
+  function openIncome(id) { var ie = S.incomes.find(function (x) { return x.id === id; }); if (ie && ie.collect) sheetCollectDetail(ie.id); else sheetIncome(id); }
+  function movInfo(e) {
+    var find = function (arr) { return arr.find(function (x) { return x.id === e.id; }); }, r, t = '', s = '';
+    if (e.coll === 'docs') { r = find(S.docs); t = (r && r.client && r.client.name) || e.party || 'Facture'; s = 'Facture ' + ((r && r.number) || e.ref || ''); return { t: t, s: s, act: 'doc' }; }
+    if (e.coll === 'incomes') {
+      r = find(S.incomes);
+      if (r && r.collect) { t = r.collect.name || r.desc; s = 'Ta part · ' + eur(r.amount) + ' collectés'; }
+      else { t = r ? (r.source || r.desc) : e.label; s = r && r.desc && r.desc !== t ? r.desc : ''; }
+      return { t: t, s: s, act: 'inc' };
+    }
+    r = find(S.expenses); t = r ? (r.vendor || r.payee || r.desc || e.label) : e.label;
+    s = r && (r.vendor || r.payee) && r.desc ? r.desc : '';
+    if (e.cat === 'asset') s = (s ? s + ' · ' : '') + 'amorti sur plusieurs années';
+    return { t: t, s: s, act: 'exp' };
+  }
+  function signed(v, sg) { return (v ? sg : '') + eur(v); }
+  var SHORT_CAT = { invoice: 'Factures payées', collectShare: 'Ta part des collectes', platform: 'Plateformes (YouTube, TikTok…)', sponsor: 'Sponsoring', donation: 'Dons', crowdfunding: 'Collectes', other: 'Autres recettes' };
+  function sheetMonth(y, m) {
+    var st = { y: y, m: m, open: {} }, sp;
+    function groups(list) {
+      var g = {}, order = [];
+      list.forEach(function (e) {
+        if (!g[e.cat]) { g[e.cat] = { key: e.cat, label: SHORT_CAT[e.cat] || String(e.catFr || '').split(' (')[0], total: 0, items: [] }; order.push(g[e.cat]); }
+        g[e.cat].total = C.r2(g[e.cat].total + e.amount); g[e.cat].items.push(e);
+      });
+      order.forEach(function (x) { x.items.sort(function (a, b) { return a.date < b.date ? 1 : a.date > b.date ? -1 : 0; }); });
+      return order.sort(function (a, b) { return b.total - a.total; });
+    }
+    function block(list, dir, title, empty, openAll) {
+      var tot = 0; list.forEach(function (e) { tot += e.amount; }); tot = C.r2(tot);
+      var sign = dir === 'in' ? '+' : '−';
+      var html = '<section class="sec"><div class="sec-h"><h2>' + title + '</h2><span class="hint" style="margin:0">' + h(signed(tot, sign)) + '</span></div>';
+      if (!list.length) return html + '<div class="list"><div class="item" style="cursor:default"><div class="item-main"><div class="item-s">' + empty + '</div></div></div></div></section>';
+      html += '<div class="list">';
+      groups(list).forEach(function (g) {
+        var k = dir + ':' + g.key, open = k in st.open ? st.open[k] : openAll, pct = tot ? Math.round(g.total * 100 / tot) : 0, n = g.items.length;
+        html += '<button class="item mcat ' + dir + '" data-a="cat" data-k="' + h(k) + '" aria-expanded="' + open + '"><span class="lead' + (dir === 'in' ? ' in' : '') + '">' + ic(dir === 'in' ? 'arrowIn' : 'arrowOut') + '</span>' +
+          '<div class="item-main"><div class="item-t">' + h(g.label) + '</div><div class="item-s"><span>' + n + ' mouvement' + (n > 1 ? 's' : '') + '</span><span>' + pct + ' %</span></div><div class="mbar"><i style="width:' + Math.max(pct, 2) + '%"></i></div></div>' +
+          '<div class="item-r"><span class="amt ' + dir + '">' + sign + h(eur(g.total)) + '</span></div><span class="chev">' + ic('right') + '</span></button>';
+        if (open) html += '<div class="msub">' + g.items.map(function (e) {
+          var mi = movInfo(e);
+          return '<button class="item mrow" data-a="open" data-t="' + mi.act + '" data-id="' + h(e.id) + '"><div class="item-main"><div class="item-t">' + h(mi.t) + '</div><div class="item-s"><span>' + h(C.fmtDateFr(e.date)) + '</span>' + (mi.s ? '<span>' + h(mi.s) + '</span>' : '') + (e.example ? '<span class="tag">Exemple</span>' : '') + '</div></div>' +
+            '<div class="item-r"><span class="amt ' + dir + '">' + sign + h(eur(e.amount)) + '</span></div></button>';
+        }).join('') + '</div>';
+      });
+      return html + '</div></section>';
+    }
+    sp = openSheet({
+      live: true,
+      render: function () {
+        var rep = C.euer(S, st.y), ym = st.y + '-' + String(st.m + 1).padStart(2, '0');
+        var list = rep.entries.filter(function (e) { return !e.synthetic && String(e.date).slice(0, 7) === ym; });
+        var ins = list.filter(function (e) { return e.dir === 'in'; }), outs = list.filter(function (e) { return e.dir === 'out'; });
+        var mo = rep.months[st.m], bal = C.r2(mo.in - mo.out), t = today();
+        var openAll = list.length <= 6;
+        var nowM = String(t).slice(0, 4) === String(st.y) ? Number(String(t).slice(5, 7)) - 1 : -1;
+        var nav = '<div class="mnav"><button class="iconbtn" data-a="prev" aria-label="Mois précédent">' + ic('left') + '</button><button class="iconbtn" data-a="next" aria-label="Mois suivant">' + ic('right') + '</button></div>';
+        var body = '<div class="panel">' + chartSVG(rep, { sel: st.m, now: nowM, tap: 'data-a="m"' }) + '</div>' +
+          '<div class="duo"><div class="fig"><div class="fig-l"><i style="background:var(--accent)"></i>Entrées · ' + ins.length + '</div><div class="fig-n">' + h(signed(mo.in, '+')) + '</div></div>' +
+          '<div class="fig"><div class="fig-l"><i style="background:var(--series-2)"></i>Sorties · ' + outs.length + '</div><div class="fig-n">' + h(signed(mo.out, '−')) + '</div></div></div>' +
+          '<div class="mbal"><span>Solde du mois' + (st.m === nowM ? ' · en cours' : '') + '</span><b class="' + (bal < 0 ? 'neg' : '') + '">' + (bal > 0 ? '+' : bal < 0 ? '−' : '') + h(eur(Math.abs(bal))) + '</b></div>';
+        if (!list.length) body += emptyBox('Aucun mouvement', 'Rien d’encaissé ni de payé en ' + C.monthLabelFr(ym).toLowerCase() + '.');
+        else body += block(ins, 'in', 'Entrées · d’où vient l’argent', 'Rien d’encaissé ce mois-ci.', openAll) + block(outs, 'out', 'Sorties · où part l’argent', 'Rien de payé ce mois-ci.', openAll);
+        var tr = (rep.transit && rep.transit.mode === 'transit' ? rep.transit.rows : []).filter(function (x) { return String(x.date).slice(0, 7) === ym; });
+        if (tr.length) {
+          body += '<section class="sec"><div class="sec-h"><h2>Argent qui transite</h2></div><div class="list">' + tr.map(function (x) {
+            return '<button class="item mrow" data-a="open" data-t="inc" data-id="' + h(x.id) + '"><span class="lead">' + ic('heart') + '</span><div class="item-main"><div class="item-t">' + h(x.name) + '</div><div class="item-s"><span>Collecté ' + h(eur(x.collected)) + '</span><span>' + (x.payout ? h(eur(x.payout)) + ' reversés' : 'rien de reversé') + '</span></div></div>' +
+              '<div class="item-r"><span class="amt in">+' + h(eur(x.share)) + '</span><span class="hint" style="margin:0">ta part</span></div></button>';
+          }).join('') + '</div><p class="hint">Seule ta part est comptée dans les entrées. L’argent des familles n’apparaît ni en entrée ni en sortie.</p></section>';
+        }
+        body += '<p class="hint">Comme le graphique : une facture compte le jour où elle est payée, une dépense le jour où tu la paies. Touche une catégorie pour voir le détail, puis un mouvement pour l’ouvrir.</p>';
+        return shell(C.monthLabelFr(ym), body, nav);
+      },
+      onClick: function (e) {
+        var t = e.target.closest('[data-a]'); if (!t) return;
+        var a = t.dataset.a;
+        if (a === 'm') { st.m = +t.dataset.m; st.open = {}; drawSheet(sp); }
+        else if (a === 'prev' || a === 'next') {
+          st.m += a === 'prev' ? -1 : 1;
+          if (st.m < 0) { st.m = 11; st.y--; } else if (st.m > 11) { st.m = 0; st.y++; }
+          st.open = {}; drawSheet(sp);
+          var b = sp.el.querySelector('.sheet-b'); if (b) b.scrollTop = 0;
+        }
+        else if (a === 'cat') { var k = t.dataset.k; st.open[k] = t.getAttribute('aria-expanded') !== 'true'; drawSheet(sp); }
+        else if (a === 'open') { var id = t.dataset.id, tt = t.dataset.t; if (tt === 'doc') sheetDoc(id); else if (tt === 'exp') sheetExpense(id); else openIncome(id); }
+      }
+    });
+  }
+
   function openSheet(spec) {
     var el = document.createElement('section');
     el.className = 'sheet'; el.setAttribute('role', 'dialog'); el.setAttribute('aria-modal', 'true');
@@ -3582,6 +3708,7 @@ var Core = (function () {
       renderMain(); window.scrollTo(0, 0);
     }
     else if (a === 'doc') sheetDoc(t.dataset.id);
+    else if (a === 'month') sheetMonth(S.year, +t.dataset.m);
     else if (a === 'newdoc') sheetDocEdit({ kind: t.dataset.kind });
     else if (a === 'client') sheetClient(t.dataset.id);
     else if (a === 'newclient') sheetClient(null);
@@ -3590,7 +3717,7 @@ var Core = (function () {
     else if (a === 'scanexp') sheetExpense(null, { scan: true });
     else if (a === 'bulkexp') sheetBulk();
     else if (a === 'homeoffice') sheetHomeoffice(S.year);
-    else if (a === 'inc') { var ie = S.incomes.find(function (x) { return x.id === t.dataset.id; }); if (ie && ie.collect) sheetCollectDetail(ie.id); else sheetIncome(t.dataset.id); }
+    else if (a === 'inc') openIncome(t.dataset.id);
     else if (a === 'newcollect') sheetCollecte(null);
     else if (a === 'newinc') sheetIncome(null);
     else if (a === 'sub') sheetSub(t.dataset.id);
